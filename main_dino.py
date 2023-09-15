@@ -115,6 +115,7 @@ def get_args_parser():
     parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
+    parser.add_argument('--pretrained_weights', default='', type=str, help="Path to pretrained weights to re-train.")
 
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
@@ -176,6 +177,21 @@ def train_dino(args):
         student = torchvision_models.__dict__[args.arch]()
         teacher = torchvision_models.__dict__[args.arch]()
         embed_dim = student.fc.weight.shape[1]
+
+        if args.pretrained_weights != "":
+
+            def load_state_dict(path_to_weight, key):
+                state_dict = torch.load(path_to_weight, map_location="cpu")[key]
+                # remove `module.` prefix
+                state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+                # remove `backbone.` prefix induced by multicrop wrapper
+                state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
+
+                return state_dict
+
+            student.load_state_dict(load_state_dict(args.pretrained_weights, 'student'), strict=False)
+            teacher.load_state_dict(load_state_dict(args.pretrained_weights, 'teacher'), strict=False)
+
     else:
         print(f"Unknow architecture: {args.arch}")
 

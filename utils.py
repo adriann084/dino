@@ -78,6 +78,10 @@ def load_pretrained_weights(model, pretrained_weights, checkpoint_key, model_nam
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         # remove `backbone.` prefix induced by multicrop wrapper
         state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
+
+        path_to_save = f'{str(pretrained_weights).split(".pth")[0]}_weights.pth'
+        torch.save(state_dict, path_to_save)
+
         msg = model.load_state_dict(state_dict, strict=False)
         print('Pretrained weights found at {} and loaded with msg: {}'.format(pretrained_weights, msg))
     else:
@@ -486,7 +490,7 @@ def init_distributed_mode(args):
         sys.exit(1)
 
     dist.init_process_group(
-        backend="nccl",
+        backend="gloo",
         init_method=args.dist_url,
         world_size=args.world_size,
         rank=args.rank,

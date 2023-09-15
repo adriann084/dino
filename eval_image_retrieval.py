@@ -152,6 +152,10 @@ if __name__ == '__main__':
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         # remove `backbone.` prefix induced by multicrop wrapper
         state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
+
+        path_to_save = f'{str(args.pretrained_weights).split(".pth")[0]}_weights.pth'
+        torch.save(model.state_dict(), path_to_save)
+
         msg = model.load_state_dict(state_dict, strict=False)
         print('Pretrained weights found at {} and loaded with msg: {}'.format(args.pretrained_weights, msg))
     elif args.arch == "vit_small" and args.patch_size == 16:
