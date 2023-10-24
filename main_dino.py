@@ -63,6 +63,8 @@ def get_args_parser():
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag,
         help="Whether to use batch normalizations in projection head (Default: False)")
+    parser.add_argument('--pretrained_weights', default='', type=str, help="Path to pretrained weights to re-train.")
+    parser.add_argument('--pretrained_torchvision', default=True, type=bool, help="Use pretrained values.")
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
@@ -115,7 +117,6 @@ def get_args_parser():
     parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
-    parser.add_argument('--pretrained_weights', default='', type=str, help="Path to pretrained weights to re-train.")
 
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
@@ -127,6 +128,15 @@ def get_args_parser():
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
+
+    #Augmentation parameters
+    parser.add_argument('--aug_flip', default=True, type=bool,
+                        help='Perform Horizontal Flip on training images.')
+    parser.add_argument('--aug_gauss_blur', default=True, type=bool,
+                        help='Perform Gaussian Blur on training images.')
+    parser.add_argument('--aug_color', default=True, type=bool,
+                        help='Perform color changes on training images.')
+
     return parser
 
 
@@ -137,11 +147,17 @@ def train_dino(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
+    aug_options = dict()
+    aug_options["GaussianBlur"] = args.aug_gauss_blur
+    aug_options["color"] = args.aug_color
+    aug_options["flip"] = args.aug_flip
+
     # ============ preparing data ... ============
     transform = DataAugmentationDINO(
         args.global_crops_scale,
         args.local_crops_scale,
         args.local_crops_number,
+        aug_options,
     )
     dataset = datasets.ImageFolder(args.data_path, transform=transform)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
@@ -174,8 +190,8 @@ def train_dino(args):
         embed_dim = student.embed_dim
     # otherwise, we check if the architecture is in torchvision models
     elif args.arch in torchvision_models.__dict__.keys():
-        student = torchvision_models.__dict__[args.arch]()
-        teacher = torchvision_models.__dict__[args.arch]()
+        student = torchvision_models.__dict__[args.arch](pretrained=args.pretrained_torchvision)
+        teacher = torchvision_models.__dict__[args.arch](pretrained=args.pretrained_torchvision)
         embed_dim = student.fc.weight.shape[1]
 
         if args.pretrained_weights != "":
@@ -433,43 +449,57 @@ class DINOLoss(nn.Module):
 
 
 class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
-        flip_and_color_jitter = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                p=0.8
-            ),
-            transforms.RandomGrayscale(p=0.2),
-        ])
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, aug_options):
+
+        flip_and_color_jitter = transforms.Compose([])
+
+        if aug_options["flip"]:
+            flip_and_color_jitter.transforms.append(transforms.RandomHorizontalFlip(p=0.8))
+
+        if aug_options["color"]:
+            flip_and_color_jitter.transforms.append(transforms.RandomApply([
+                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
+                    p=0.8
+                ))
+            flip_and_color_jitter.transforms.append(transforms.RandomGrayscale(p=0.2))
+
         normalize = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
 
-        # first global crop
-        self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(1.0),
-            normalize,
-        ])
-        # second global crop
         self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(0.1),
-            utils.Solarization(0.2),
-            normalize,
+            # transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
         ])
+
+        self.global_transfo1 = transforms.Compose([
+            # transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+        ])
+
+        self.local_transfo = transforms.Compose([
+            # transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+        ])
+
+        if aug_options["flip"] or aug_options["color"]:
+            self.global_transfo2.transforms.append(flip_and_color_jitter)
+            self.global_transfo1.transforms.append(flip_and_color_jitter)
+            self.local_transfo.transforms.append(flip_and_color_jitter)
+
+        if aug_options["GaussianBlur"]:
+
+            self.global_transfo1.transforms.append(utils.GaussianBlur(1.0))
+            self.global_transfo2.transforms.append(utils.GaussianBlur(0.1))
+            self.local_transfo.transforms.append(utils.GaussianBlur(0.5))
+
+            if aug_options["color"]:
+                self.global_transfo2.transforms.append(utils.Solarization(0.2))
+
+        self.global_transfo1.transforms.append(normalize)
+        self.global_transfo2.transforms.append(normalize)
+        self.local_transfo.transforms.append(normalize)
+
         # transformation for the local small crops
         self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(p=0.5),
-            normalize,
-        ])
 
     def __call__(self, image):
         crops = []
